@@ -78,6 +78,15 @@
   .sol-block h4 { margin: 4px 0; color: var(--amber); }
   #global-error { display: none; }
   .spacer { flex: 1; }
+  .field { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
+  .field input[type=text] {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 7px; padding: 7px 10px; min-width: 210px; font: inherit;
+  }
+  .compare-bar { align-items: flex-end; }
+  .compare-note { color: var(--muted); font-size: 13px; margin: 4px 0 12px; }
+  .diff-yes { color: #ff9d97; font-weight: 700; }
+  .diff-no { color: var(--muted); }
   footer { color: var(--muted); text-align: center; padding: 24px; font-size: 12.5px; }
 </style>
 </head>
@@ -114,6 +123,39 @@
     </details>
   </div>
 
+  <div class="card" id="compare-card">
+    <h2 style="margin:0 0 4px;font-size:17px">🕓 时区库升级对比</h2>
+    <p class="compare-note">
+      上传同一份地服原始 CSV、填写要升级的 IANA 时区名，并提供该时区升级前/后的两份 TZif 文件。
+      两套规则会分别跑完整条清洗链；<b>其他时区仍按系统 tzdata 处理</b>。
+      普通「开始清洗」与导出按钮不受这里影响。
+    </p>
+    <div class="upload-bar compare-bar">
+      <div class="field">
+        <label for="compareFile">地服原始 CSV</label>
+        <input type="file" id="compareFile" accept=".csv,text/csv">
+      </div>
+      <div class="field">
+        <label for="compareTz">IANA 时区名</label>
+        <input type="text" id="compareTz" placeholder="例如 America/Mexico_City" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="tzifBefore">升级前 TZif 文件</label>
+        <input type="file" id="tzifBefore" accept=".tzif,.tz,application/octet-stream">
+      </div>
+      <div class="field">
+        <label for="tzifAfter">升级后 TZif 文件</label>
+        <input type="file" id="tzifAfter" accept=".tzif,.tz,application/octet-stream">
+      </div>
+      <button id="compareBtn" disabled>开始对比</button>
+      <button class="secondary" id="compareSampleBtn">📦 载入时区升级样例</button>
+    </div>
+    <div class="file-name" id="compareFileName">未选择 CSV</div>
+    <div class="file-name" id="tzifNames">未选择 TZif 文件</div>
+    <div class="error-box" id="compare-error" style="display:none"></div>
+    <div id="compare-results"></div>
+  </div>
+
   <div class="card error-box" id="global-error"></div>
 
   <div id="summary"></div>
@@ -124,6 +166,9 @@
 <script>
 let currentFile = null;
 let lastResult = null;
+let compareCsvFile = null;
+let tzifBeforeFile = null;
+let tzifAfterFile = null;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g,
@@ -150,6 +195,212 @@ $('sampleBtn').addEventListener('click', async () => {
   $('solveBtn').disabled = false;
   $('fileInput').value = '';
 });
+
+// ---- 时区库升级对比：独立状态，不影响上面的普通清洗 ----
+function updateCompareReady() {
+  const ready = !!(compareCsvFile && tzifBeforeFile && tzifAfterFile
+                   && $('compareTz').value.trim());
+  $('compareBtn').disabled = !ready;
+}
+
+$('compareFile').addEventListener('change', (e) => {
+  compareCsvFile = e.target.files[0] || null;
+  $('compareFileName').textContent = compareCsvFile
+    ? 'CSV: ' + compareCsvFile.name : '未选择 CSV';
+  updateCompareReady();
+});
+$('tzifBefore').addEventListener('change', (e) => {
+  tzifBeforeFile = e.target.files[0] || null;
+  updateTzifNames();
+});
+$('tzifAfter').addEventListener('change', (e) => {
+  tzifAfterFile = e.target.files[0] || null;
+  updateTzifNames();
+});
+$('compareTz').addEventListener('input', updateCompareReady);
+$('compareBtn').addEventListener('click', runCompare);
+$('compareSampleBtn').addEventListener('click', loadCompareSample);
+
+function updateTzifNames() {
+  const parts = [];
+  if (tzifBeforeFile) parts.push('升级前: ' + tzifBeforeFile.name);
+  if (tzifAfterFile) parts.push('升级后: ' + tzifAfterFile.name);
+  $('tzifNames').textContent = parts.length ? parts.join('　') : '未选择 TZif 文件';
+  updateCompareReady();
+}
+
+async function fetchAsFile(url, name) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('样例文件载入失败: ' + url);
+  const blob = await resp.blob();
+  return new File([blob], name, {type: blob.type || 'application/octet-stream'});
+}
+
+async function loadCompareSample() {
+  hideCompareError();
+  $('compare-results').innerHTML = '';
+  $('compareSampleBtn').disabled = true;
+  try {
+    const [csv, before, after] = await Promise.all([
+      fetchAsFile('/api/compare/sample/csv', 'tz_compare_sample.csv'),
+      fetchAsFile('/api/compare/sample/tzif/before', 'America_Mexico_City_before.tzif'),
+      fetchAsFile('/api/compare/sample/tzif/after', 'America_Mexico_City_after.tzif'),
+    ]);
+    compareCsvFile = csv;
+    tzifBeforeFile = before;
+    tzifAfterFile = after;
+    $('compareTz').value = 'America/Mexico_City';
+    $('compareFile').value = '';
+    $('tzifBefore').value = '';
+    $('tzifAfter').value = '';
+    $('compareFileName').textContent = '已载入样例 CSV（当地时间未改，入仓 UTC 改变）';
+    updateTzifNames();
+    updateCompareReady();
+    await runCompare();
+  } catch (err) {
+    showCompareError(String(err.message || err));
+  } finally {
+    $('compareSampleBtn').disabled = false;
+  }
+}
+
+async function runCompare() {
+  if (!compareCsvFile || !tzifBeforeFile || !tzifAfterFile) return;
+  const tz = $('compareTz').value.trim();
+  if (!tz) { showCompareError('请填写 IANA 时区名'); return; }
+
+  hideCompareError();
+  $('compare-results').innerHTML = '';  // 出错时不保留任何旧对比结果
+  const fd = new FormData();
+  fd.append('file', compareCsvFile);
+  fd.append('tz', tz);
+  fd.append('tzif_before', tzifBeforeFile);
+  fd.append('tzif_after', tzifAfterFile);
+  $('compareBtn').disabled = true;
+  try {
+    const resp = await fetch('/api/compare', {method: 'POST', body: fd});
+    let data = null;
+    try { data = await resp.json(); } catch (e) {}
+    if (!resp.ok) {
+      showCompareError((data && data.detail) || '对比失败');
+      return;
+    }
+    renderCompare(data);
+  } catch (err) {
+    showCompareError('请求失败: ' + err);
+  } finally {
+    $('compareBtn').disabled = false;
+    updateCompareReady();
+  }
+}
+
+function showCompareError(msg) {
+  const el = $('compare-error');
+  el.textContent = '⚠ ' + msg;
+  el.style.display = 'block';
+  $('compare-results').innerHTML = '';
+}
+function hideCompareError() { $('compare-error').style.display = 'none'; }
+
+const CAND_ERR_LABEL = {
+  nonexistent: '该当地时间在这份规则中不存在',
+  unknown_tz: '非法 IANA 时区',
+};
+
+function candStateHtml(state) {
+  if (state.error) {
+    return `<span class="cand">${esc(CAND_ERR_LABEL[state.error] || state.error)}</span>`;
+  }
+  if (!state.candidates.length) return '—';
+  return state.candidates.map(c => `<span class="mono">${esc(c)}</span>`).join('<br>');
+}
+
+function statusBadge(status) {
+  const meta = STATUS_META[status] || {label: status, cls: 'error'};
+  return `<span class="badge ${meta.cls}">${esc(meta.label)}</span>`;
+}
+
+function renderCompare(data) {
+  const s = data.summary;
+  let html = `<div class="summary-chips">
+    <span class="chip">时区 ${esc(data.timezone)}</span>
+    <span class="chip">数据行 ${s.rows}</span>
+    <span class="chip">机尾 ${s.total_tails}</span>
+    <span class="chip amber">候选变化源行 ${s.candidate_changed_rows}</span>
+    <span class="chip amber">候选变化端点 ${s.candidate_changed_ends}</span>
+    <span class="chip">受影响机尾 ${s.affected_tails}</span>
+    <span class="chip ${s.status_changed_tails ? 'red' : ''}">整链状态变化 ${s.status_changed_tails}</span>
+    <span class="chip ${s.exportable_changed_tails ? 'red' : 'green'}">可导出资格变化 ${s.exportable_changed_tails}</span>
+    <span class="chip ${s.chain_changed_tails ? 'amber' : 'green'}">最终 UTC 变化机尾 ${s.chain_changed_tails}</span>
+  </div>`;
+
+  if (!data.candidate_changes.length) {
+    html += `<div class="warn-box">这份 CSV 在该时区下没有源行出现 UTC 候选变化。</div>`;
+    $('compare-results').innerHTML = html;
+    return;
+  }
+
+  const candRows = data.candidate_changes.map(c => `<tr>
+    <td>${c.row}</td><td>${esc(c.tail)}</td><td>${esc(c.seq)}</td>
+    <td>${c.end === 'dep' ? '起飞' : '落地'}</td>
+    <td>${esc(c.local)}<br><span class="note">${esc(c.timezone)}</span></td>
+    <td>${candStateHtml(c.before)}</td>
+    <td>${candStateHtml(c.after)}</td>
+  </tr>`).join('');
+  html += `<h3 style="margin:16px 0 4px;font-size:15px">① UTC 候选发生变化的源行</h3>
+    <table><thead><tr>
+      <th>源行</th><th>机尾</th><th>seq</th><th>端</th><th>当地时刻 / 时区</th>
+      <th>升级前候选</th><th>升级后候选</th>
+    </tr></thead><tbody>${candRows}</tbody></table>`;
+
+  if (!data.tails.length) {
+    $('compare-results').innerHTML = html;
+    return;
+  }
+
+  const tailRows = data.tails.map(t => `<tr>
+    <td>${esc(t.tail)}</td>
+    <td>${t.candidate_change_count}</td>
+    <td>${statusBadge(t.before_status)}</td>
+    <td>${statusBadge(t.after_status)}</td>
+    <td>${t.before_exportable ? '<span class="chosen">可导出</span>' : '<span class="cand">禁止导出</span>'}</td>
+    <td>${t.after_exportable ? '<span class="chosen">可导出</span>' : '<span class="cand">禁止导出</span>'}</td>
+  </tr>`).join('');
+  html += `<h3 style="margin:20px 0 4px;font-size:15px">② 受影响机尾的整链状态与可导出资格</h3>
+    <table><thead><tr>
+      <th>机尾</th><th>候选变化端点</th><th>升级前整链状态</th><th>升级后整链状态</th>
+      <th>升级前可导出</th><th>升级后可导出</th>
+    </tr></thead><tbody>${tailRows}</tbody></table>`;
+
+  html += `<h3 style="margin:20px 0 4px;font-size:15px">③ 整条链上最终入仓 UTC 的变化</h3>`;
+  data.tails.forEach(t => {
+    html += `<div class="sol-block"><h4>✈ ${esc(t.tail)}</h4>`;
+    if (!t.chain_diff.available) {
+      html += `<p class="note">不可比较：${esc(t.chain_diff.reason)}。升级前 ${esc(t.before_status)}，
+        升级后 ${esc(t.after_status)}。</p>`;
+    } else if (!t.chain_diff.changes.length) {
+      html += `<p class="note">两边均为唯一解，且最终入仓 UTC 完全一致。</p>`;
+    } else {
+      const rows = t.chain_diff.changes.map(ch => `<tr>
+        <td>${ch.seq}</td>
+        <td>${ch.end === 'dep' ? '起飞' : '落地'}</td>
+        <td>${esc(ch.local)}<br><span class="note">${esc(ch.timezone)}</span></td>
+        <td>${esc(ch.before_utc)}</td>
+        <td>${esc(ch.after_utc)}</td>
+        <td>${ch.candidate_changed
+          ? '<span class="diff-yes">是</span>'
+          : '<span class="diff-no">否（候选未变，受整链约束改变）</span>'}</td>
+      </tr>`).join('');
+      html += `<table><thead><tr>
+        <th>seq</th><th>端</th><th>当地时刻 / 时区</th>
+        <th>升级前最终 UTC</th><th>升级后最终 UTC</th><th>候选是否变化</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+    }
+    html += `</div>`;
+  });
+
+  $('compare-results').innerHTML = html;
+}
 
 $('solveBtn').addEventListener('click', async () => {
   hideGlobalError();

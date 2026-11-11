@@ -11,6 +11,9 @@ docker compose up --build
 
 浏览器打开 <http://localhost:8000> ，点击「📦 载入内置夏令时样例」→「开始清洗」即可看到完整演示。
 
+「🕓 时区库升级对比」区域提供独立入口：点击「📦 载入时区升级样例」即可自动载入
+一组**当地时间没改、入仓 UTC 却改变**的样例（CSV + 升级前/后两份 TZif），并直接展示对比结果。
+
 本地开发（不用 Docker）：
 
 ```bash
@@ -19,7 +22,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-自检（仅标准库）：`python3 tests/test_solver.py`
+自检（仅标准库）：`python3 tests/test_solver.py && python3 tests/test_compare.py`
 
 ## 输入 CSV 格式
 
@@ -58,6 +61,23 @@ B-7001,1,2026-10-25 00:30,Europe/London,2026-10-25 02:15,Europe/Berlin,90,130
 - 导出列：`tail_number,seq,dep_utc,arr_utc,duration_minutes`（UTC 为 ISO 8601 `Z` 格式）；
 - 服务端在导出时会**重新求解并复核唯一性**，非唯一解返回 409，杜绝误导出。
 
+## 时区库升级对比
+
+用于升级 tzdata/时区库前评估影响：上传地服原始 CSV、一个 IANA 时区名，以及该时区
+**升级前 / 升级后**两份 TZif 文件。
+
+- 两套规则分别跑完整清洗链；**只有指定时区使用上传的 TZif**，CSV 里其他时区仍按系统 tzdata 处理；
+- 普通「开始清洗」与两个导出按钮不经过对比逻辑，结果不受影响；
+- 网页列出 UTC 候选发生变化的源行、起降端及升级前/后候选；
+- 对这些源行所属机尾，对照升级前/后的整链状态（唯一解/无解/多解/错误）与可导出资格；
+- 当某机尾在两边均为唯一解时，列出整条链上所有最终起降 UTC 的变化，包含**候选未变、但因整链约束最终取值改变**的端点；
+- 任一 TZif 无法读取时，接口返回 400 并明确说明是「升级前」还是「升级后」文件有误，不返回任何对比结果。
+
+内置对比样例 `samples/tz_compare_sample.csv` + `samples/tzif/mexico_before.tzif` /
+`mexico_after.tzif` 模拟墨西哥城 2026 年取消夏令时：当地时间完全不变，UTC 候选与最终入仓时刻整体偏移 1 小时。
+其中 B-8003 在升级前因重复时刻多解、升级后变为唯一解，用于演示整链状态与可导出资格的变化。
+TZif 对应的 `zic` 源文件也保留在 `samples/tzif/` 便于复核。
+
 ## 内置样例（samples/dst_sample.csv）
 
 | 机尾 | 场景 | 期望结果 |
@@ -76,6 +96,9 @@ B-7001,1,2026-10-25 00:30,Europe/London,2026-10-25 02:15,Europe/Berlin,90,130
 | `GET` | `/api/sample` | 下载内置样例 CSV |
 | `POST` | `/api/solve` | 上传 CSV（multipart 字段 `file`），返回逐机尾求解结果 JSON |
 | `POST` | `/api/export` | 字段 `file` + `tail`（`__all__` 表示全部可导出机尾），返回 UTC CSV；非唯一解 409 |
+| `POST` | `/api/compare` | 字段 `file`、`tz`、`tzif_before`、`tzif_after`；对比两套 TZif 规则的整链清洗结果；TZif 有误 400 |
+| `GET` | `/api/compare/sample/csv` | 内置时区升级对比样例 CSV |
+| `GET` | `/api/compare/sample/tzif/{before\|after}` | 内置样例的升级前/后 TZif |
 | `GET` | `/docs` | FastAPI 自动文档 |
 
 ## 目录结构
@@ -84,8 +107,12 @@ B-7001,1,2026-10-25 00:30,Europe/London,2026-10-25 02:15,Europe/Berlin,90,130
 app/
   main.py            # FastAPI 路由
   solver.py          # 候选生成 + 整链求解 + 冲突定位（纯标准库）
+  compare.py         # 时区库升级对比（TZif 校验 + 两套规则求解 + 逐项比对）
   static/index.html  # 单页前端
 samples/dst_sample.csv
+samples/tz_compare_sample.csv
+samples/tzif/        # 对比样例的升级前/后 TZif 与 zic 源文件
 tests/test_solver.py
+tests/test_compare.py
 Dockerfile / docker-compose.yml / requirements.txt
 ```

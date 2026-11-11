@@ -68,17 +68,24 @@ def parse_naive(text: str):
     return None
 
 
-def utc_candidates(naive: datetime, tz_name: str):
+def utc_candidates(naive: datetime, tz_name: str, tz_overrides=None):
     """把 naive 当地时间映射为可能的 UTC 时刻。
+
+    tz_overrides 用于「时区库升级对比」：传入 {IANA 名: ZoneInfo} 时，
+    指定时区改用上传的 TZif 规则，其余时区仍使用系统 tzdata。
 
     返回 (sorted_candidates, error_kind)：
     - error_kind 为 None：候选列表（重复时刻含 2 个候选，普通时刻 1 个）
     - error_kind 为 "unknown_tz" / "nonexistent"：候选为 None
     """
-    try:
-        tz = ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, ValueError, KeyError):
-        return None, "unknown_tz"
+    override = (tz_overrides or {}).get(tz_name)
+    if override is not None:
+        tz = override
+    else:
+        try:
+            tz = ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError, KeyError):
+            return None, "unknown_tz"
     found = set()
     for fold in (0, 1):
         aware = naive.replace(tzinfo=tz, fold=fold)
@@ -188,7 +195,7 @@ def _parse_minutes(raw: str):
     return None
 
 
-def build_segment(raw: RawRow):
+def build_segment(raw: RawRow, tz_overrides=None):
     """行级校验 + 候选生成。返回 (Segment|None, [错误信息])。"""
     errors = []
 
@@ -224,7 +231,7 @@ def build_segment(raw: RawRow):
 
     dep_candidates = arr_candidates = None
     if dep_naive is not None:
-        dep_candidates, err = utc_candidates(dep_naive, raw.dep_tz)
+        dep_candidates, err = utc_candidates(dep_naive, raw.dep_tz, tz_overrides)
         if err == "unknown_tz":
             errors.append(f"起飞时区不是合法的 IANA 时区: {raw.dep_tz!r}")
         elif err == "nonexistent":
@@ -232,7 +239,7 @@ def build_segment(raw: RawRow):
                 f"起飞当地时间 {raw.dep_local_raw} 在时区 {raw.dep_tz} 中不存在"
                 "（夏令时拨快跳过了该时刻），请与地服核对")
     if arr_naive is not None:
-        arr_candidates, err = utc_candidates(arr_naive, raw.arr_tz)
+        arr_candidates, err = utc_candidates(arr_naive, raw.arr_tz, tz_overrides)
         if err == "unknown_tz":
             errors.append(f"落地时区不是合法的 IANA 时区: {raw.arr_tz!r}")
         elif err == "nonexistent":
@@ -362,11 +369,11 @@ def _solution_view(solution, segments) -> list:
     ]
 
 
-def solve_tail(tail: str, raws: list) -> dict:
+def solve_tail(tail: str, raws: list, tz_overrides=None) -> dict:
     errors = []
     segments = []
     for raw in raws:
-        seg, errs = build_segment(raw)
+        seg, errs = build_segment(raw, tz_overrides)
         if errs:
             errors.append({"row": raw.row_number, "messages": errs})
         else:
@@ -400,14 +407,18 @@ def solve_tail(tail: str, raws: list) -> dict:
     }
 
 
-def solve_csv(csv_text: str) -> dict:
-    """主入口：解析 CSV 文本，按机尾分组求解，返回完整结果 dict。"""
+def solve_csv(csv_text: str, tz_overrides=None) -> dict:
+    """主入口：解析 CSV 文本，按机尾分组求解，返回完整结果 dict。
+
+    tz_overrides 仅供时区库升级对比使用；不传时完全沿用系统 tzdata。
+    """
     raws = read_rows(csv_text)
     tails: dict = {}
     for raw in raws:
         tails.setdefault(raw.tail, []).append(raw)
 
-    results = [solve_tail(tail, group) for tail, group in tails.items()]
+    results = [solve_tail(tail, group, tz_overrides)
+               for tail, group in tails.items()]
     summary = {
         "rows": len(raws),
         "total_tails": len(results),
